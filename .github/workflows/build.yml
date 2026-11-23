@@ -63,48 +63,65 @@ jobs:
 
       - name: Prepare kernel config
         run: |
-          cd src/Code_Opensource/kernel
+          KDIR="$GITHUB_WORKSPACE/src/Code_Opensource/kernel"
+          OUT="$GITHUB_WORKSPACE/src/out"
+          mkdir -p "$OUT"
           if [ -s "$GITHUB_WORKSPACE/configs/v20_defconfig.txt" ] && \
              [ $(wc -l < "$GITHUB_WORKSPACE/configs/v20_defconfig.txt") -gt 100 ]; then
             echo 'using device defconfig from repo'
-            cp "$GITHUB_WORKSPACE/configs/v20_defconfig.txt" .config
+            cp "$GITHUB_WORKSPACE/configs/v20_defconfig.txt" "$OUT/.config"
           else
             echo 'fallback: huawei kirin980 defconfig'
-            cp arch/arm64/configs/merge_kirin980_defconfig .config
+            cp "$KDIR/arch/arm64/configs/merge_kirin980_defconfig" "$OUT/.config"
           fi
-          echo "--- config lines: $(wc -l < .config) ---"
-          grep -E '^CONFIG_(FUTEX_PI|HW_FUTEX_PI|RT_MUTEXES|CFI_CLANG|LTO_CLANG|ARM64_PAN|SECURITY_SELINUX_DEVELOP|STATIC_USERMODEHELPER)=' .config || true
+          echo "--- config lines: $(wc -l < "$OUT/.config") ---"
+          grep -E '^CONFIG_(FUTEX_PI|HW_FUTEX_PI|RT_MUTEXES|CFI_CLANG|LTO_CLANG|ARM64_PAN|SECURITY_SELINUX_DEVELOP|STATIC_USERMODEHELPER)=' "$OUT/.config" || true
+          echo "--- .config location check ---"
+          ls -lh "$OUT/.config"
 
       - name: Build kernel
         run: |
-          cd src/Code_Opensource/kernel
           export PATH=$HOME/toolchain/clang-r353983c/bin:$PATH
-          set +e
-          make ARCH=arm64 O=../../out \
+          KDIR="$GITHUB_WORKSPACE/src/Code_Opensource/kernel"
+          OUT="$GITHUB_WORKSPACE/src/out"
+          cd "$KDIR"
+
+          MAKE_ARGS="ARCH=arm64 O=$OUT \
             CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
             LD=ld.lld AR=llvm-ar NM=llvm-nm \
             OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
-            HOSTCC=gcc HOSTCXX=g++ \
-            -j$(nproc) 2>&1 | tee /tmp/build.log
+            HOSTCC=gcc HOSTCXX=g++"
+
+          echo '=== step 1: olddefconfig ==='
+          set +e
+          make $MAKE_ARGS olddefconfig 2>&1 | tail -20
+          echo "olddefconfig exit: $?"
+          set -e
+
+          echo '=== step 2: build ==='
+          set +e
+          make $MAKE_ARGS -j4 2>&1 | tee /tmp/build.log
           RC=${PIPESTATUS[0]}
           set -e
           echo "=== build exit code: $RC ==="
           tail -60 /tmp/build.log
-          if [ ! -f ../../out/vmlinux ]; then
+
+          if [ ! -f "$OUT/vmlinux" ]; then
             echo '=== vmlinux NOT produced ==='
-            ls -la ../../out/ 2>/dev/null | head -30
+            ls -la "$OUT" | head -30
             echo '=== errors ==='
             grep -iE 'error:|Error [0-9]|fatal error' /tmp/build.log | head -40 || true
             exit 1
           fi
-          ls -lh ../../out/vmlinux
+          ls -lh "$OUT/vmlinux"
 
       - name: Extract symbols
         if: success()
         run: |
           mkdir -p artifacts
-          VMLINUX=$(find "$GITHUB_WORKSPACE" -name vmlinux -type f | head -1)
+          OUT="$GITHUB_WORKSPACE/src/out"
+          VMLINUX="$OUT/vmlinux"
           echo "vmlinux=$VMLINUX"
           aarch64-linux-gnu-nm -n "$VMLINUX" > artifacts/System.map 2>/dev/null || \
             nm -n "$VMLINUX" > artifacts/System.map || true
@@ -115,7 +132,7 @@ jobs:
           echo '=== kernel banner ==='
           strings "$VMLINUX" | grep -m3 'Linux version 4\.14' || true
           cp "$VMLINUX" artifacts/vmlinux
-          cp src/Code_Opensource/kernel/.config artifacts/kernel.config 2>/dev/null || true
+          cp "$OUT/.config" artifacts/kernel.config 2>/dev/null || true
           ls -lh artifacts/
 
       - name: Upload artifacts
